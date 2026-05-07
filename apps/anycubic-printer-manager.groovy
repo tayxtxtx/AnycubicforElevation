@@ -87,6 +87,13 @@ def discoveryPage() {
             input "scanGlobalTimeout", "number",
                   title: "Maximum scan duration (seconds)",
                   defaultValue: 120, range: "30..600", submitOnChange: false
+            input "knownMacs", "text",
+                  title: "Known printer MACs (one per line, optional)",
+                  description: "e.g. AA:BB:CC:11:22:33 — full MAC or just the OUI prefix (AA:BB:CC). Used to identify and optionally filter discovery results.",
+                  required: false, submitOnChange: false
+            input "requireMacMatch", "bool",
+                  title: "Only show printers whose MAC matches the list above",
+                  defaultValue: false, submitOnChange: true
         }
         section {
             if (active) {
@@ -102,17 +109,35 @@ def discoveryPage() {
             }
         }
         section("Found printers") {
-            List found = (state.found ?: []) as List
+            List<Map> found = ((state.found ?: []) as List).collect { it as Map }
+            List<String> filterList = parseMacList(knownMacs)
+            boolean filterOn = (requireMacMatch == true) && filterList
+            List<Map> shown = found.findAll { Map p ->
+                if (!filterOn) return true
+                String mac = (p.mac ?: "") as String
+                return mac && macMatchesList(mac, filterList)
+            }
+            int hiddenByFilter = found.size() - shown.size()
+
             if (!found) {
                 paragraph active ? "No results yet." : "Nothing found. Try a scan."
+            } else if (!shown) {
+                paragraph "Found ${found.size()} responder(s) but none match the MAC filter."
             } else {
-                found.eachWithIndex { Map p, int idx ->
+                shown.each { Map p ->
+                    int idx = found.indexOf(p)
                     String label = "${p.kind == 'moonraker' ? 'Moonraker' : 'OctoPrint'} @ ${p.ip}:${p.port}"
+                    String macStr = p.mac ? " — MAC <code>${formatMac(p.mac as String)}</code>" :
+                                            " — MAC pending…"
                     String existing = childForEndpoint(p.ip, p.port, p.kind)?.displayName
-                    paragraph "<b>${label}</b>" + (existing ? " — already added as <i>${existing}</i>" : "")
+                    String suffix = existing ? " — already added as <i>${existing}</i>" : ""
+                    paragraph "<b>${label}</b>${macStr}${suffix}"
                     if (!existing) {
                         input "add_${idx}", "button", title: "Add as device"
                     }
+                }
+                if (hiddenByFilter > 0) {
+                    paragraph "<i>${hiddenByFilter} responder(s) hidden by MAC filter.</i>"
                 }
             }
         }
@@ -320,12 +345,13 @@ void scanResult(resp, data) {
         }
 
         if (match) {
-            List found = ((state.found ?: []) as List).collect { it as Map }
+            List<Map> found = ((state.found ?: []) as List).collect { it as Map }
             boolean dup = found.any { it.ip == data.ip && it.port == data.port && it.kind == kind }
             if (!dup) {
-                found << [ip: data.ip, port: data.port, kind: kind]
+                found << [ip: data.ip, port: data.port, kind: kind, mac: null]
                 state.found = found
-                if (logEnable) log.debug "discovered ${kind} at ${data.ip}:${data.port}"
+                if (logEnable) log.debug "discovered ${kind} at ${data.ip}:${data.port} — capturing MAC"
+                captureMac(data.ip as String, data.port as Integer, kind)
             }
         }
     } catch (Throwable t) {
@@ -333,15 +359,163 @@ void scanResult(resp, data) {
     }
 }
 
+/* -------- MAC capture (HubAction round-trip) -------- */
+
+private void captureMac(String ip, Integer port, String kind) {
+    try {
+        String hexIp = ip.tokenize(".").collect { String.format("%02X", (it as Integer)) }.join("")
+        String hexPort = String.format("%04X", port)
+        String dni = "${hexIp}:${hexPort}"
+        String path = (kind == "moonraker") ? "/server/info" : "/api/version"
+
+        def action = new hubitat.device.HubAction(
+            method: "GET",
+            path: path,
+            headers: [HOST: "${ip}:${port}", Accept: "application/json"]
+        )
+        action.dni = dni
+        action.options = [callback: "macCaptureResult", type: hubitat.device.Protocol.LAN]
+        sendHubCommand(action)
+    } catch (Throwable t) {
+        if (logEnable) log.debug "MAC capture skipped for ${ip}:${port}: ${t.message}"
+    }
+}
+
+void macCaptureResult(response) {
+    try {
+        String mac = response?.mac
+        String ipHex = null
+        String portHex = null
+        if (response?.headers) {
+            // Hubitat puts the source MAC in response.mac directly. The DNI
+            // form ipHex:portHex is also available via the description but
+            // we don't need it.
+        }
+        if (!mac) {
+            // Some hub versions surface MAC via response?.description as
+            // "mac:XXXXXXXXXXXX, ip:..., ..."
+            String desc = (response?.description ?: "") as String
+            def m = desc =~ /mac:\s*([0-9A-Fa-f:]+)/
+            if (m.find()) mac = m.group(1)
+        }
+        if (!mac) {
+            if (logEnable) log.debug "MAC capture: response had no MAC"
+            return
+        }
+        String ip = inferIpFromResponse(response)
+        Integer port = inferPortFromResponse(response)
+        if (logEnable) log.debug "MAC ${mac} for ${ip}:${port}"
+
+        List<Map> found = ((state.found ?: []) as List).collect { it as Map }
+        boolean updated = false
+        found.each { Map p ->
+            if ((ip == null || p.ip == ip) && (port == null || (p.port as Integer) == port)) {
+                if (!p.mac) {
+                    p.mac = normalizeMac(mac)
+                    updated = true
+                }
+            }
+        }
+        // Fallback: if we couldn't pin down ip/port, attach the MAC to the
+        // most recent entry that's still missing one.
+        if (!updated) {
+            Map last = found.reverse().find { it.mac == null }
+            if (last) {
+                last.mac = normalizeMac(mac)
+                updated = true
+            }
+        }
+        if (updated) state.found = found
+    } catch (Throwable t) {
+        log.error "macCaptureResult error: ${t.message}"
+    }
+}
+
+private String inferIpFromResponse(response) {
+    try {
+        // Hubitat HubResponse exposes neither ip nor port directly across all
+        // versions. The DNI in response.deviceNetworkId / response.dni is
+        // ipHex:portHex when the request was sent with such a DNI.
+        String dni = (response?.deviceNetworkId ?: response?.dni ?: "") as String
+        if (dni && dni.contains(":")) {
+            String ipHex = dni.tokenize(":")[0]
+            if (ipHex?.length() == 8) {
+                return [
+                    Integer.parseInt(ipHex.substring(0, 2), 16),
+                    Integer.parseInt(ipHex.substring(2, 4), 16),
+                    Integer.parseInt(ipHex.substring(4, 6), 16),
+                    Integer.parseInt(ipHex.substring(6, 8), 16)
+                ].join(".")
+            }
+        }
+    } catch (ignored) { }
+    return null
+}
+
+private Integer inferPortFromResponse(response) {
+    try {
+        String dni = (response?.deviceNetworkId ?: response?.dni ?: "") as String
+        if (dni && dni.contains(":")) {
+            String portHex = dni.tokenize(":")[1]
+            if (portHex) return Integer.parseInt(portHex, 16)
+        }
+    } catch (ignored) { }
+    return null
+}
+
+/* -------- MAC helpers -------- */
+
+private String normalizeMac(String mac) {
+    if (!mac) return ""
+    return mac.replaceAll(/[^0-9A-Fa-f]/, "").toUpperCase()
+}
+
+private String formatMac(String mac) {
+    String n = normalizeMac(mac)
+    if (n.length() != 12) return mac
+    return (0..5).collect { n.substring(it * 2, it * 2 + 2) }.join(":")
+}
+
+private List<String> parseMacList(String text) {
+    if (!text) return []
+    return text.split(/[\s,;]+/)
+               .collect { normalizeMac(it as String) }
+               .findAll { it && it.length() in 6..12 }
+}
+
+private boolean macMatchesList(String mac, List<String> list) {
+    String n = normalizeMac(mac)
+    if (!n || !list) return false
+    return list.any { String entry ->
+        // Match if entry is a prefix (OUI = 6 hex chars) or full equality.
+        n == entry || (entry.length() < 12 && n.startsWith(entry))
+    }
+}
+
 /* -------- child management -------- */
 
 private def childForEndpoint(String ip, Integer port, String kind) {
-    String dni = childDni(ip, port, kind)
-    return getChildDevice(dni)
+    // Try IP-based DNI (legacy); also look up by MAC if any found entry has one.
+    String legacyDni = "anycubic-${kind}-${ip}-${port}".replaceAll(/[^A-Za-z0-9-]/, "-")
+    def existing = getChildDevice(legacyDni)
+    if (existing) return existing
+    Map p = ((state.found ?: []) as List).find {
+        Map m = it as Map
+        m.ip == ip && (m.port as Integer) == port && m.kind == kind
+    } as Map
+    if (p?.mac) {
+        return getChildDevice("anycubic-${kind}-${normalizeMac(p.mac as String)}")
+    }
+    return null
 }
 
-private String childDni(String ip, Integer port, String kind) {
-    return "anycubic-${kind}-${ip}-${port}".replaceAll(/[^A-Za-z0-9-]/, "-")
+private String childDni(Map p) {
+    String mac = normalizeMac((p.mac ?: "") as String)
+    if (mac && mac.length() == 12) {
+        // MAC-based DNI is stable across DHCP changes.
+        return "anycubic-${p.kind}-${mac}"
+    }
+    return "anycubic-${p.kind}-${p.ip}-${p.port}".replaceAll(/[^A-Za-z0-9-]/, "-")
 }
 
 private void createChildFor(Map p) {
@@ -350,7 +524,7 @@ private void createChildFor(Map p) {
         ? "Anycubic (Moonraker) 3D Printer"
         : "Anycubic (OctoPrint) 3D Printer"
     String label = "Anycubic ${kind.capitalize()} ${p.ip}"
-    String dni = childDni(p.ip, p.port as Integer, kind)
+    String dni = childDni(p)
     if (getChildDevice(dni)) {
         log.info "child already exists for ${dni}"
         return
@@ -365,6 +539,9 @@ private void createChildFor(Map p) {
             child.updateSetting("host", [type: "string", value: p.ip])
             child.updateSetting("port", [type: "number", value: p.port])
             child.updateSetting("useHttps", [type: "bool", value: false])
+        }
+        if (p.mac) {
+            try { child.updateDataValue("mac", formatMac(p.mac as String)) } catch (ignored) { }
         }
         // Drivers schedule polling on updated() — call it so the new prefs take effect.
         try { child.updated() } catch (ignored) { }
