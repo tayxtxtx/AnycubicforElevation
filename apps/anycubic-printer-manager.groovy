@@ -62,18 +62,32 @@ def discoveryPage() {
         section {
             paragraph "Hub IP: ${location?.hub?.localIP ?: 'unknown'}"
             paragraph "Scan range: ${scan.subnet ?: '(not started)'}"
-            input "scanPortsMoonraker", "string",
-                  title: "Moonraker ports to probe (comma-separated)",
-                  defaultValue: "7125", submitOnChange: false
-            input "scanPortsOctoprint", "string",
-                  title: "OctoPrint ports to probe (comma-separated)",
-                  defaultValue: "80,5000", submitOnChange: false
+            input "scanMoonraker", "bool",
+                  title: "Scan for Moonraker printers",
+                  defaultValue: true, submitOnChange: true
+            if (scanMoonraker != false) {
+                input "scanPortsMoonraker", "string",
+                      title: "Moonraker ports to probe (comma-separated)",
+                      defaultValue: "7125", submitOnChange: false
+            }
+            input "scanOctoprint", "bool",
+                  title: "Scan for OctoPrint printers",
+                  defaultValue: true, submitOnChange: true
+            if (scanOctoprint != false) {
+                input "scanPortsOctoprint", "string",
+                      title: "OctoPrint ports to probe (comma-separated)",
+                      defaultValue: "80,5000", submitOnChange: false
+            }
         }
         section {
             if (active) {
-                paragraph "Scanning… ${scan.completed ?: 0} of ${scan.total ?: 0} probes done."
+                paragraph "Scanning ${scan.kinds ?: ''}… ${scan.completed ?: 0} of ${scan.total ?: 0} probes done."
             } else {
-                input "startScan", "button", title: "Start scan"
+                if (scanMoonraker == false && scanOctoprint == false) {
+                    paragraph "<b>Both scan types are disabled.</b> Enable at least one above before scanning."
+                } else {
+                    input "startScan", "button", title: "Start scan"
+                }
             }
         }
         section("Found printers") {
@@ -132,16 +146,26 @@ private void startScan() {
         log.warn "no hub IP available"
         return
     }
+    boolean doMoonraker = (scanMoonraker != false)
+    boolean doOctoprint = (scanOctoprint != false)
+    if (!doMoonraker && !doOctoprint) {
+        log.warn "both Moonraker and OctoPrint scanning are disabled — nothing to do"
+        state.scan = [subnet: "(disabled)", total: 0, completed: 0, pending: 0]
+        return
+    }
+
     String prefix = hubIp.replaceAll(/\.\d+$/, "")
-    List<Integer> mPorts = parsePorts(scanPortsMoonraker, [7125])
-    List<Integer> oPorts = parsePorts(scanPortsOctoprint, [80, 5000])
+    List<Integer> mPorts = doMoonraker ? parsePorts(scanPortsMoonraker, [7125]) : []
+    List<Integer> oPorts = doOctoprint ? parsePorts(scanPortsOctoprint, [80, 5000]) : []
+    Integer total = 254 * (mPorts.size() + oPorts.size())
 
     state.found = []
     state.scan = [
         subnet: "${prefix}.1-254",
-        total: 254 * (mPorts.size() + oPorts.size()),
+        kinds: [doMoonraker ? "Moonraker" : null, doOctoprint ? "OctoPrint" : null].findAll().join(", "),
+        total: total,
         completed: 0,
-        pending: 254 * (mPorts.size() + oPorts.size()),
+        pending: total,
         startedAt: now()
     ]
     if (logEnable) log.debug "scan starting: ${state.scan}"
