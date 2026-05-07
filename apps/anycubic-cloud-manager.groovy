@@ -82,6 +82,8 @@ def mainPage() {
         section("Diagnostics") {
             paragraph "Session: ${state.sessionToken ? 'authenticated' : 'not logged in'}" +
                       (state.lastError ? "<br>Last error: <code>${state.lastError}</code>" : "")
+            input "dumpPayload", "button", title: "Dump next printer payload to logs"
+            paragraph "<small>Click to log the full raw JSON returned by getPrinters on the next poll. Useful for debugging field-name mismatches. Logged at INFO level once, then turns itself off.</small>"
             input "logEnable", "bool", title: "Enable debug logging", defaultValue: false
             input "txtEnable", "bool", title: "Description text logging", defaultValue: true
         }
@@ -103,6 +105,11 @@ def appButtonHandler(String btn) {
             break
         case "rediscover":
             fetchPrinters(true)
+            break
+        case "dumpPayload":
+            state.dumpNextPayload = true
+            log.info "next getPrinters poll will be dumped to logs"
+            fetchPrinters(false)
             break
     }
 }
@@ -266,6 +273,16 @@ void printersHandler(resp, data) {
         }
 
         Map body = safeJson(resp)
+
+        if (state.dumpNextPayload) {
+            try {
+                log.info "RAW getPrinters body: ${groovy.json.JsonOutput.prettyPrint(groovy.json.JsonOutput.toJson(body))}"
+            } catch (Throwable t) {
+                log.info "RAW getPrinters body (toString): ${body}"
+            }
+            state.dumpNextPayload = false
+        }
+
         // Empty or null data is the documented "session expired" signal.
         def dataField = body?.data
         if (dataField == null || (dataField instanceof Map && dataField.isEmpty())) {

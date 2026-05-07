@@ -176,27 +176,44 @@ void updateFromCloud(Map p) {
 /* -------- helpers -------- */
 
 private String onlineString(Map p) {
-    def v = p.online
-    if (v == null) v = p.is_online
-    if (v == null) v = p.machine_status
+    def v = pickValue(p, [
+        "online", "is_online", "isOnline",
+        "device_status", "deviceStatus",
+        "connect_status", "connection_status", "connectStatus", "connectionStatus",
+        "mqtt_status", "mqttStatus",
+        "machine_status", "machineStatus",
+        "active", "is_active",
+        "status"   // tried last; on stock Anycubic responses this commonly holds online state
+    ])
     if (v == null) return "unknown"
-    String s = v.toString().toLowerCase()
-    if (s in ["1", "true", "online", "y", "yes"]) return "online"
-    if (s in ["0", "false", "offline", "n", "no"]) return "offline"
+    String s = v.toString().toLowerCase().trim()
+    if (s in ["1", "true", "online", "y", "yes", "active", "connected", "ready"]) return "online"
+    if (s in ["0", "false", "offline", "n", "no", "inactive", "disconnected"]) return "offline"
     return s
 }
 
 private String mapStatus(Map p) {
-    String s = (p.print_status ?: p.status ?: p.state ?: p.print_state ?: "")?.toString()?.toLowerCase()
-    if (!s) return "unknown"
-    if (s in ["printing", "1"]) return "printing"
-    if (s in ["paused", "pause", "2"]) return "paused"
-    if (s in ["complete", "completed", "finish", "finished", "3"]) return "complete"
-    if (s in ["cancelled", "canceled", "stopped", "stop", "4"]) return "cancelled"
-    if (s in ["error", "fault", "failed", "5"]) return "error"
-    if (s in ["idle", "ready", "standby", "free", "0"]) return "ready"
-    if (s in ["offline"]) return "offline"
-    return s
+    // Use only true print-state fields here. Do NOT consume the generic "status"
+    // field — on stock Anycubic responses that's the online flag, and reading
+    // "1" as "printing" was the cause of idle printers showing "printing".
+    String s = (p.print_status ?: p.printStatus ?: p.print_state ?: p.printState ?:
+                p.task_status ?: p.taskStatus ?: p.printing_status ?: "")?.toString()?.toLowerCase()?.trim()
+    if (s) {
+        if (s in ["printing", "running", "1"]) return "printing"
+        if (s in ["paused", "pause", "2"]) return "paused"
+        if (s in ["complete", "completed", "finish", "finished", "3"]) return "complete"
+        if (s in ["cancelled", "canceled", "stopped", "stop", "4"]) return "cancelled"
+        if (s in ["error", "fault", "failed", "5"]) return "error"
+        if (s in ["idle", "ready", "standby", "free", "0"]) return "ready"
+        if (s == "offline") return "offline"
+        return s
+    }
+    // No explicit print-state field — infer from current project / progress.
+    def proj = p.current_project_id ?: p.project_id ?: p.taskid ?: p.task_id ?: p.currentProjectId
+    boolean hasActiveProject = (proj != null) && !(proj.toString() in ["0", "", "null"])
+    Number prog = pickNumber(p, ["progress", "print_progress", "printProgress"], -1)
+    if (hasActiveProject || (prog != null && prog.intValue() > 0 && prog.intValue() < 100)) return "printing"
+    return "ready"
 }
 
 private def pickValue(Map p, List<String> keys) {
