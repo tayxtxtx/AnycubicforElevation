@@ -78,10 +78,21 @@ def discoveryPage() {
                       title: "OctoPrint ports to probe (comma-separated)",
                       defaultValue: "80,5000", submitOnChange: false
             }
+            input "scanBatchSize", "number",
+                  title: "Probes per batch (lower = gentler, slower scan)",
+                  defaultValue: 25, range: "1..100", submitOnChange: false
+            input "scanBatchInterval", "number",
+                  title: "Seconds between batches",
+                  defaultValue: 2, range: "1..30", submitOnChange: false
+            input "scanGlobalTimeout", "number",
+                  title: "Maximum scan duration (seconds)",
+                  defaultValue: 120, range: "30..600", submitOnChange: false
         }
         section {
             if (active) {
-                paragraph "Scanning ${scan.kinds ?: ''}… ${scan.completed ?: 0} of ${scan.total ?: 0} probes done."
+                Integer queued = ((state.queue ?: []) as List).size()
+                paragraph "Scanning ${scan.kinds ?: ''}… ${scan.completed ?: 0} of ${scan.total ?: 0} probes done (${queued} still queued)."
+                input "cancelScan", "button", title: "Cancel scan"
             } else {
                 if (scanMoonraker == false && scanOctoprint == false) {
                     paragraph "<b>Both scan types are disabled.</b> Enable at least one above before scanning."
@@ -113,6 +124,10 @@ def discoveryPage() {
 def appButtonHandler(String btn) {
     if (btn == "startScan") {
         startScan()
+        return
+    }
+    if (btn == "cancelScan") {
+        cancelScan("user cancelled")
         return
     }
     if (btn?.startsWith("add_")) {
@@ -151,30 +166,112 @@ private void startScan() {
     if (!doMoonraker && !doOctoprint) {
         log.warn "both Moonraker and OctoPrint scanning are disabled — nothing to do"
         state.scan = [subnet: "(disabled)", total: 0, completed: 0, pending: 0]
+        state.queue = []
         return
     }
 
     String prefix = hubIp.replaceAll(/\.\d+$/, "")
     List<Integer> mPorts = doMoonraker ? parsePorts(scanPortsMoonraker, [7125]) : []
     List<Integer> oPorts = doOctoprint ? parsePorts(scanPortsOctoprint, [80, 5000]) : []
-    Integer total = 254 * (mPorts.size() + oPorts.size())
+
+    List<Map> queue = []
+    (1..254).each { Integer host ->
+        String ip = "${prefix}.${host}"
+        mPorts.each { Integer p -> queue << [ip: ip, port: p, kind: "moonraker"] }
+        oPorts.each { Integer p -> queue << [ip: ip, port: p, kind: "octoprint"] }
+    }
 
     state.found = []
+    state.queue = queue
     state.scan = [
         subnet: "${prefix}.1-254",
         kinds: [doMoonraker ? "Moonraker" : null, doOctoprint ? "OctoPrint" : null].findAll().join(", "),
-        total: total,
+        total: queue.size(),
         completed: 0,
-        pending: total,
+        pending: queue.size(),
         startedAt: now()
     ]
     if (logEnable) log.debug "scan starting: ${state.scan}"
 
-    (1..254).each { Integer host ->
-        String ip = "${prefix}.${host}"
-        mPorts.each { Integer p -> probeMoonraker(ip, p) }
-        oPorts.each { Integer p -> probeOctoprint(ip, p) }
+    unschedule("scanTick")
+    unschedule("scanTimeout")
+    Integer timeout = (scanGlobalTimeout ?: 120) as Integer
+    runIn(timeout, "scanTimeout")
+    scanTick()
+}
+
+void scanTick() {
+    List<Map> queue = ((state.queue ?: []) as List).collect { it as Map }
+    if (!queue) {
+        // Nothing left to send. If callbacks are still pending, the global
+        // timeout will finalize; otherwise mark done now.
+        Map scan = (state.scan ?: [:]) as Map
+        if (((scan.pending ?: 0) as Integer) <= 0) {
+            finalizeScan("complete")
+        }
+        return
     }
+    Integer batchSize = (scanBatchSize ?: 25) as Integer
+    if (batchSize < 1) batchSize = 1
+    Integer interval = (scanBatchInterval ?: 2) as Integer
+    if (interval < 1) interval = 1
+
+    int n = Math.min(batchSize, queue.size())
+    List<Map> batch = queue.take(n)
+    state.queue = queue.drop(n)
+
+    batch.each { Map p ->
+        if (p.kind == "moonraker") probeMoonraker(p.ip as String, p.port as Integer)
+        else probeOctoprint(p.ip as String, p.port as Integer)
+    }
+    if (logEnable) log.debug "fired batch of ${n}, ${((state.queue ?: []) as List).size()} queued"
+
+    if (((state.queue ?: []) as List).size() > 0) {
+        runIn(interval, "scanTick")
+    } else {
+        // Last batch dispatched. Give callbacks a brief grace window before
+        // the global timeout cleans up anything stuck.
+        runIn(10, "scanFinalizeIfQuiet")
+    }
+}
+
+void scanFinalizeIfQuiet() {
+    Map scan = (state.scan ?: [:]) as Map
+    if (((scan.pending ?: 0) as Integer) <= 0) {
+        finalizeScan("complete")
+    }
+}
+
+void scanTimeout() {
+    Map scan = (state.scan ?: [:]) as Map
+    Integer pending = (scan.pending ?: 0) as Integer
+    Integer queued = ((state.queue ?: []) as List).size()
+    if (pending > 0 || queued > 0) {
+        log.warn "scan timed out: ${queued} queued, ${pending} pending callbacks dropped"
+        finalizeScan("timed out (${pending} probes had no response)")
+    }
+}
+
+private void cancelScan(String reason) {
+    unschedule("scanTick")
+    unschedule("scanFinalizeIfQuiet")
+    unschedule("scanTimeout")
+    state.queue = []
+    finalizeScan(reason)
+}
+
+private void finalizeScan(String reason) {
+    unschedule("scanTick")
+    unschedule("scanFinalizeIfQuiet")
+    unschedule("scanTimeout")
+    Map scan = (state.scan ?: [:]) as Map
+    scan.pending = 0
+    scan.queue = 0
+    scan.finishedAt = now()
+    scan.result = reason
+    state.scan = scan
+    state.queue = []
+    if (logEnable) log.debug "scan finalized: ${reason}; found ${(state.found ?: []).size()}"
 }
 
 private List<Integer> parsePorts(String s, List<Integer> dflt) {
