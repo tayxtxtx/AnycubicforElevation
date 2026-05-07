@@ -87,6 +87,16 @@ def discoveryPage() {
             input "scanGlobalTimeout", "number",
                   title: "Maximum scan duration (seconds)",
                   defaultValue: 120, range: "30..600", submitOnChange: false
+            input "scanStartHost", "number",
+                  title: "Start at host (last octet)",
+                  defaultValue: 1, range: "1..254", submitOnChange: false
+            input "scanEndHost", "number",
+                  title: "End at host (last octet)",
+                  defaultValue: 254, range: "1..254", submitOnChange: false
+            input "scanSubnetOverride", "string",
+                  title: "Subnet override (optional)",
+                  description: "e.g. 192.168.5 to scan a /24 different from the hub's. Leave blank to use the hub's subnet.",
+                  required: false, submitOnChange: false
             input "knownMacs", "text",
                   title: "Known printer MACs (one per line, optional)",
                   description: "e.g. AA:BB:CC:11:22:33 — full MAC or just the OUI prefix (AA:BB:CC). Used to identify and optionally filter discovery results.",
@@ -195,12 +205,32 @@ private void startScan() {
         return
     }
 
-    String prefix = hubIp.replaceAll(/\.\d+$/, "")
+    String prefix = (scanSubnetOverride ?: "").trim()
+    if (!prefix) {
+        prefix = hubIp.replaceAll(/\.\d+$/, "")
+    } else {
+        // Accept "192.168.5", "192.168.5.", or "192.168.5.0/24" — keep first three octets.
+        prefix = prefix.replaceAll(/\/.*/, "").replaceAll(/\.+$/, "")
+        def parts = prefix.tokenize(".")
+        if (parts.size() >= 3) {
+            prefix = parts[0..2].join(".")
+        } else {
+            log.warn "subnet override '${scanSubnetOverride}' is malformed; falling back to hub subnet"
+            prefix = hubIp.replaceAll(/\.\d+$/, "")
+        }
+    }
+
+    Integer startHost = clampHost(scanStartHost, 1)
+    Integer endHost = clampHost(scanEndHost, 254)
+    if (startHost > endHost) {
+        Integer t = startHost; startHost = endHost; endHost = t
+    }
+
     List<Integer> mPorts = doMoonraker ? parsePorts(scanPortsMoonraker, [7125]) : []
     List<Integer> oPorts = doOctoprint ? parsePorts(scanPortsOctoprint, [80, 5000]) : []
 
     List<Map> queue = []
-    (1..254).each { Integer host ->
+    (startHost..endHost).each { Integer host ->
         String ip = "${prefix}.${host}"
         mPorts.each { Integer p -> queue << [ip: ip, port: p, kind: "moonraker"] }
         oPorts.each { Integer p -> queue << [ip: ip, port: p, kind: "octoprint"] }
@@ -209,7 +239,7 @@ private void startScan() {
     state.found = []
     state.queue = queue
     state.scan = [
-        subnet: "${prefix}.1-254",
+        subnet: "${prefix}.${startHost}-${endHost}",
         kinds: [doMoonraker ? "Moonraker" : null, doOctoprint ? "OctoPrint" : null].findAll().join(", "),
         total: queue.size(),
         completed: 0,
@@ -297,6 +327,15 @@ private void finalizeScan(String reason) {
     state.scan = scan
     state.queue = []
     if (logEnable) log.debug "scan finalized: ${reason}; found ${(state.found ?: []).size()}"
+}
+
+private Integer clampHost(def v, Integer dflt) {
+    try {
+        Integer n = (v == null) ? dflt : (v as Integer)
+        if (n < 1) return 1
+        if (n > 254) return 254
+        return n
+    } catch (ignored) { return dflt }
 }
 
 private List<Integer> parsePorts(String s, List<Integer> dflt) {
