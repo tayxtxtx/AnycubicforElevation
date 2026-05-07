@@ -37,13 +37,36 @@ while a print is running, both configurable.
 
 ## Installation
 
+You can either install just the drivers and add devices manually, or also
+install the companion app for one-click network discovery.
+
+### Drivers (required)
+
 1. In Hubitat, open **Developer tools → Drivers code → New driver**.
-2. Paste the contents of `drivers/anycubic-moonraker-driver.groovy` (and/or
-   `drivers/anycubic-octoprint-driver.groovy`) and click **Save**.
-3. Open **Devices → Add device → Virtual**.
-4. Set **Type** to *Anycubic (Moonraker) 3D Printer* or *Anycubic (OctoPrint)
+2. Paste the contents of `drivers/anycubic-moonraker-driver.groovy` and click
+   **Save**.
+3. Repeat for `drivers/anycubic-octoprint-driver.groovy` if you want OctoPrint
+   support too.
+
+### Manager app (optional, for auto-discovery)
+
+1. Open **Developer tools → Apps code → New app**.
+2. Paste the contents of `apps/anycubic-printer-manager.groovy` and click
+   **Save**.
+3. Open **Apps → Add user app** and pick *Anycubic Printer Manager*.
+4. Click **Scan my network**, wait for the probe to finish, then click **Add as
+   device** next to each printer it finds. The app auto-detects the hub's /24
+   subnet and probes Moonraker on `7125` and OctoPrint on `80`/`5000` by
+   default; you can override either before clicking **Start scan**.
+5. Open each newly created device and add an API key if required (Moonraker
+   when not using `trusted_clients`, OctoPrint always).
+
+### Adding a device manually (without the manager app)
+
+1. Open **Devices → Add device → Virtual**.
+2. Set **Type** to *Anycubic (Moonraker) 3D Printer* or *Anycubic (OctoPrint)
    3D Printer*.
-5. Open the new device, fill in the preferences (see below), and click **Save
+3. Open the new device, fill in the preferences (see below), and click **Save
    Preferences**.
 
 ## Configuration — Moonraker driver
