@@ -3,18 +3,21 @@
 Hubitat drivers that bring Anycubic 3D printers into your smart home so you can
 monitor and control them from rules, dashboards, and routines.
 
-Two drivers are included; pick whichever matches how your printer is reachable
-on the network:
+Three drivers are included; pick whichever matches how your printer is
+reachable:
 
-| Driver | Best for | Local-only? |
+| Driver | Best for | Network path |
 | --- | --- | --- |
-| `Anycubic (Moonraker) 3D Printer` | Klipper-based Anycubics (Kobra 3, modded Kobra 2 series) and any other Klipper printer with Moonraker exposed on the LAN | Yes |
-| `Anycubic (OctoPrint) 3D Printer` | Older Anycubics paired with an OctoPrint host over USB (Mega, Chiron, Vyper, Photon, older Kobra, etc.) | Yes |
+| `Anycubic (Moonraker) 3D Printer` | Klipper-based Anycubics (Kobra 3, modded Kobra 2 series) and any Klipper printer with Moonraker exposed on the LAN | Local HTTP |
+| `Anycubic (OctoPrint) 3D Printer` | Older Anycubics paired with an OctoPrint host over USB (Mega, Chiron, Vyper, Photon, older Kobra, etc.) | Local HTTP |
+| `Anycubic Cloud Printer` (paired with the *Anycubic Cloud Manager* app) | **Stock-firmware** Anycubics that only talk to Anycubic's cloud — Kobra S1, Kobra 3, Photon Mono M5s/M7, etc. | HTTPS to Anycubic Cloud |
 
-The Anycubic cloud / app MQTT path is intentionally **not** used. It depends on
-reverse-engineered authentication against Anycubic's servers and breaks
-whenever they change it. Both drivers here talk to your printer (or its
-companion host) directly on your LAN.
+**Local vs cloud — which do I want?** If you can reach Moonraker or OctoPrint
+on your LAN, use one of those. They're faster, more private, and don't break
+when Anycubic ships a backend change. Use the cloud driver only if your
+printers are stock and you can't / don't want to mod them. The cloud driver is
+HTTP-polling-only (15–60 s lag) because Anycubic's MQTT broker requires a
+client TLS certificate that Hubitat's MQTT client cannot supply.
 
 ## Features
 
@@ -60,6 +63,39 @@ install the companion app for one-click network discovery.
    default; you can override either before clicking **Start scan**.
 5. Open each newly created device and add an API key if required (Moonraker
    when not using `trusted_clients`, OctoPrint always).
+
+### Cloud setup (stock-firmware printers)
+
+1. Install both files first:
+   - `drivers/anycubic-cloud-printer.groovy` → **Drivers code → New driver**
+   - `apps/anycubic-cloud-manager.groovy` → **Apps code → New app**
+2. **Get your Anycubic access_token.** Install Anycubic Slicer Next and log in with your Anycubic account. Then locate the slicer's config file:
+   - Windows: `%AppData%\AnycubicSlicerNext\AnycubicSlicerNext.conf`
+   - macOS: `~/Library/Application Support/AnycubicSlicerNext/AnycubicSlicerNext.conf`
+   - Linux: `~/.config/AnycubicSlicerNext/AnycubicSlicerNext.conf`
+
+   Open it in a text editor and copy the `access_token` value (about 344 characters).
+3. In Hubitat, **Apps → Add user app → Anycubic Cloud Manager**. Paste the
+   access token, set polling intervals if you want to override defaults, and
+   click **Done** (or **Test login now** to verify before saving).
+4. Within a few seconds the app logs in, fetches your printer list, and creates
+   one **Anycubic Cloud Printer** child device per printer. They'll be named
+   after whatever you've called the printer in the Anycubic app.
+
+Notes on the cloud path:
+- The app re-logs in automatically when the session expires (Anycubic doesn't
+  document an expiry — typically days).
+- **Don't run Slicer Next at the same time** if you can help it — Anycubic's
+  cloud sometimes kicks the older session when two clients with the same
+  client identity connect.
+- Status updates lag by your poll interval. Default is 60 s when idle, 15 s
+  during active prints.
+- Pause/resume/cancel commands go through Anycubic's HTTP API and take
+  effect within a couple of seconds; the next poll picks up the new state.
+- This integration is reverse-engineered against Anycubic's undocumented
+  cloud API and can break without warning when they change it. The session
+  token approach (vs. email/password) was forced on the community after
+  Anycubic locked down the easier paths in late 2024.
 
 ### Adding a device manually (without the manager app)
 
