@@ -1,0 +1,49 @@
+<%- include('partials/head', { title: 'Book the bay' }) %>
+
+<header class="topbar">
+  <a class="brand small" href="/">← Autoshop</a>
+</header>
+
+<section class="form-card">
+  <h2>Book the bay</h2>
+  <p class="muted">Max <%= config.maxDurationHours %> h per reservation, up to <%= config.bookingWindowDays %> days ahead.</p>
+
+  <% if (error) { %><div class="alert"><%= error %></div><% } %>
+
+  <form method="post" action="/book" id="book-form">
+    <label>
+      Start
+      <input type="datetime-local" name="start" required step="900"
+             value="<%= form.start || '' %>" />
+    </label>
+
+    <label>
+      Duration
+      <select name="durationMinutes" required>
+        <%
+          const maxMin = config.maxDurationHours * 60;
+          const selected = String(form.durationMinutes || 60);
+          for (let m = 30; m <= maxMin; m += 30) {
+            const label = m % 60 === 0 ? `${m / 60} h` : `${(m / 60).toFixed(1)} h`;
+        %>
+          <option value="<%= m %>" <%= selected === String(m) ? 'selected' : '' %>><%= label %></option>
+        <% } %>
+      </select>
+    </label>
+
+    <label>
+      Note (optional)
+      <input type="text" name="note" maxlength="280" placeholder="What you're working on"
+             value="<%= form.note || '' %>" />
+    </label>
+
+    <div id="conflict-warning" class="alert hidden">A booking already exists for that range.</div>
+
+    <button type="submit" class="cta primary">Book it</button>
+    <a class="link" href="/">Cancel</a>
+  </form>
+</section>
+
+<script src="/public/app.js" defer></script>
+
+<%- include('partials/foot') %>

@@ -1,0 +1,63 @@
+<%- include('partials/head', { title: 'Autoshop bay' }) %>
+
+<header class="topbar">
+  <div class="brand small">Autoshop</div>
+  <div class="who">
+    <span><%= user.name %></span>
+    <form method="post" action="/auth/logout" class="inline">
+      <button class="link">Sign out</button>
+    </form>
+  </div>
+</header>
+
+<%
+  const now = Math.floor(Date.now() / 1000);
+  const tz = config.tz;
+  function fmtDay(unix) {
+    return new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'long', month: 'short', day: 'numeric' }).format(new Date(unix * 1000));
+  }
+  function fmtTime(unix) {
+    return new Intl.DateTimeFormat('en-US', { timeZone: tz, hour: 'numeric', minute: '2-digit' }).format(new Date(unix * 1000));
+  }
+  function dayKey(unix) {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(unix * 1000));
+  }
+  const groups = new Map();
+  for (const b of bookings) {
+    const key = dayKey(b.starts_at);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(b);
+  }
+%>
+
+<section class="schedule">
+  <h2>Upcoming bookings</h2>
+
+  <% if (bookings.length === 0) { %>
+    <p class="empty">No bookings in the next <%= config.bookingWindowDays %> days.</p>
+  <% } else { %>
+    <% for (const [key, list] of groups) { %>
+      <div class="day">
+        <h3><%= fmtDay(list[0].starts_at) %></h3>
+        <ul class="bookings">
+          <% for (const b of list) { %>
+            <li class="<%= b.user_id === user.slackUserId ? 'mine' : '' %>">
+              <span class="time"><%= fmtTime(b.starts_at) %>–<%= fmtTime(b.ends_at) %></span>
+              <span class="who-name"><%= b.user_name %></span>
+              <% if (b.note) { %><span class="note"><%= b.note %></span><% } %>
+              <% if (b.user_id === user.slackUserId) { %>
+                <form method="post" action="/bookings/<%= b.id %>/cancel" class="inline cancel">
+                  <button class="link danger">Cancel</button>
+                </form>
+              <% } %>
+            </li>
+          <% } %>
+        </ul>
+      </div>
+    <% } %>
+  <% } %>
+</section>
+
+<a class="cta primary fab" href="/book">+ Book the bay</a>
+
+<%- include('partials/foot') %>
